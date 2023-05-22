@@ -1,4 +1,4 @@
-# github.com/checkpoint-restore/go-criu/v5 v5.3.0
+# github.com/checkpoint-restore/go-criu/v5 v5.3.0 => ../../checkpoint-restore/go-criu/
 ## explicit
 github.com/checkpoint-restore/go-criu/v5
 github.com/checkpoint-restore/go-criu/v5/rpc
@@ -101,3 +101,4 @@ google.golang.org/protobuf/reflect/protoreflect
 google.golang.org/protobuf/reflect/protoregistry
 google.golang.org/protobuf/runtime/protoiface
 google.golang.org/protobuf/runtime/protoimpl
+# github.com/checkpoint-restore/go-criu/v5 => ../../checkpoint-restore/go-criu/

@@ -122,7 +122,7 @@ func (r *runningState) transition(s containerState) error {
 	case *pausedState:
 		r.c.state = s
 		return nil
-	case *runningState:
+	case *runningState, *switchState:
 		return nil
 	}
 	return newStateTransitionError(r, s)
@@ -215,6 +215,31 @@ func (r *restoredState) destroy() error {
 		if !os.IsNotExist(err) {
 			return err
 		}
+	}
+	return destroy(r.c)
+}
+
+// restoredState is the same as the running state but also has associated checkpoint
+// information that maybe need destroyed when the container is stopped and destroy is called.
+type switchState struct {
+	c *linuxContainer
+}
+
+func (r *switchState) status() Status {
+	return Running
+}
+
+func (r *switchState) transition(s containerState) error {
+	switch s.(type) {
+	case *stoppedState, *runningState, *switchState:
+		return nil
+	}
+	return newStateTransitionError(r, s)
+}
+
+func (r *switchState) destroy() error {
+	if r.c.runType() == Running {
+		return ErrRunning
 	}
 	return destroy(r.c)
 }

@@ -126,6 +126,7 @@ func main() {
 		pauseCommand,
 		psCommand,
 		restoreCommand,
+		switchCommand,
 		resumeCommand,
 		runCommand,
 		specCommand,

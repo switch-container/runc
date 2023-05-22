@@ -8,6 +8,8 @@ CRIU_FEATURE_PIDFD_STORE = $(shell if criu check --feature pidfd_store > /dev/nu
 
 export CRIU_FEATURE_MEM_TRACK CRIU_FEATURE_LAZY_PAGES CRIU_FEATURE_PIDFD_STORE
 
+FORCE:
+
 all: build test phaul-test
 
 lint:
@@ -82,8 +84,9 @@ clean:
 	@rm -f $(TEST_BINARIES) $(COVERAGE_BINARIES) codecov
 	@rm -rf image $(COVERAGE_PATH)
 
-rpc/rpc.proto:
-	curl -sSL https://raw.githubusercontent.com/checkpoint-restore/criu/master/images/rpc.proto -o $@
+# curl -sSL https://raw.githubusercontent.com/checkpoint-restore/criu/master/images/rpc.proto -o $@
+rpc/rpc.proto: FORCE
+	cp /root/criu/images/rpc.proto $@
 
 stats/stats.proto:
 	curl -sSL https://raw.githubusercontent.com/checkpoint-restore/criu/master/images/stats.proto -o $@
@@ -104,4 +107,4 @@ codecov:
 	chmod +x codecov
 	./codecov -f '.coverage/coverage.out'
 
-.PHONY: build test phaul-test test-bin clean lint vendor coverage codecov
+.PHONY: build test phaul-test test-bin clean lint vendor coverage codecov FORCE

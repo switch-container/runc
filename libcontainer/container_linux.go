@@ -116,6 +116,8 @@ type Container interface {
 
 	// NotifyMemoryPressure returns a read-only channel signaling when the container reaches a given pressure level
 	NotifyMemoryPressure(level PressureLevel) (<-chan struct{}, error)
+
+	Switch(process *Process, criuOpts *CriuOpts, originalPid int) error
 }
 
 // ID returns the container's unique ID
@@ -1020,6 +1022,44 @@ func (c *linuxContainer) handleRestoringExternalNamespaces(rpcOpts *criurpc.Criu
 	return nil
 }
 
+func (c *linuxContainer) handleSwitchNamespaces(rpcOpts *criurpc.CriuOpts, originalPid int, extraFiles *[]*os.File) error {
+	// we need skip pid namespace
+	// since it is not possible to restore (i.e. create process) into an empty pid namesapce
+	skipNs := []string{"pid"}
+	checkIfSkip := func(name string) bool {
+		for _, ns := range skipNs {
+			if name == ns {
+				return true
+			}
+		}
+		return false
+	}
+	namespaces := c.config.Namespaces
+	for _, ns := range namespaces {
+		nsPath := ns.GetPath(originalPid)
+		nsName := configs.NsName(ns.Type)
+		if checkIfSkip(nsName) {
+			continue
+		}
+
+		nsFd, err := os.Open(nsPath)
+		if err != nil {
+			return fmt.Errorf("Namespace %s do not exist when switch: %s", nsName, nsPath)
+		}
+		inheritFd := &criurpc.InheritFd{
+			Key: proto.String(fmt.Sprintf("switch-ns-%s", nsName)),
+			// The offset of four is necessary because 0, 1, 2 and 3 are
+			// already used by stdin, stdout, stderr, 'criu swrk' socket.
+			Fd: proto.Int32(int32(4 + len(*extraFiles))),
+		}
+		rpcOpts.InheritFd = append(rpcOpts.InheritFd, inheritFd)
+		// All open FDs need to be transferred to CRIU via extraFiles
+		*extraFiles = append(*extraFiles, nsFd)
+	}
+
+	return nil
+}
+
 func (c *linuxContainer) Checkpoint(criuOpts *CriuOpts) error {
 	c.m.Lock()
 	defer c.m.Unlock()
@@ -1546,6 +1586,206 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 	return err
 }
 
+func (c *linuxContainer) Switch(process *Process, criuOpts *CriuOpts, originalPid int) error {
+	logrus.Debugf("linuxContainer start switch")
+	c.m.Lock()
+	defer c.m.Unlock()
+
+	var extraFiles []*os.File
+
+	// Restore is unlikely to work if os.Geteuid() != 0 || system.RunningInUserNS().
+	// (CLI prints a warning)
+	// TODO(avagin): Figure out how to make this work nicely. CRIU doesn't have
+	//               support for unprivileged restore at the moment.
+
+	// We are relying on the CRIU version RPC which was introduced with CRIU 3.0.0
+	if err := c.checkCriuVersion(30000); err != nil {
+		return err
+	}
+	if criuOpts.ImagesDirectory == "" {
+		return errors.New("invalid directory to restore checkpoint")
+	}
+	imageDir, err := os.Open(criuOpts.ImagesDirectory)
+	if err != nil {
+		return err
+	}
+	defer imageDir.Close()
+	// TODO (huang-jl) remove this root arg and mount ops
+	// CRIU has a few requirements for a root directory:
+	// * it must be a mount point
+	// * its parent must not be overmounted
+	// c.config.Rootfs is bind-mounted to a temporary directory
+	// to satisfy these requirements.
+	root := filepath.Join(c.root, "criu-root")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		return err
+	}
+	defer os.Remove(root)
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	err = mount(c.config.Rootfs, root, "", "", unix.MS_BIND|unix.MS_REC, "")
+	if err != nil {
+		return err
+	}
+	defer unix.Unmount(root, unix.MNT_DETACH) //nolint: errcheck
+	t := criurpc.CriuReqType_RESTORE
+	req := &criurpc.CriuReq{
+		Type: &t,
+		Opts: &criurpc.CriuOpts{
+			ImagesDirFd:     proto.Int32(int32(imageDir.Fd())),
+			EvasiveDevices:  proto.Bool(true),
+			LogLevel:        proto.Int32(4),
+			LogFile:         proto.String("restore.log"),
+			RstSibling:      proto.Bool(true),
+			Root:            proto.String(root),
+			ManageCgroups:   proto.Bool(true),
+			NotifyScripts:   proto.Bool(true),
+			ShellJob:        proto.Bool(criuOpts.ShellJob),
+			ExtUnixSk:       proto.Bool(criuOpts.ExternalUnixConnections),
+			TcpEstablished:  proto.Bool(criuOpts.TcpEstablished),
+			FileLocks:       proto.Bool(criuOpts.FileLocks),
+			EmptyNs:         proto.Uint32(criuOpts.EmptyNs),
+			OrphanPtsMaster: proto.Bool(true),
+			AutoDedup:       proto.Bool(criuOpts.AutoDedup),
+			LazyPages:       proto.Bool(criuOpts.LazyPages),
+			Switch:          proto.Bool(true),
+		},
+	}
+
+	if criuOpts.LsmProfile != "" {
+		// CRIU older than 3.16 has a bug which breaks the possibility
+		// to set a different LSM profile.
+		if err := c.checkCriuVersion(31600); err != nil {
+			return errors.New("--lsm-profile requires at least CRIU 3.16")
+		}
+		req.Opts.LsmProfile = proto.String(criuOpts.LsmProfile)
+	}
+	if criuOpts.LsmMountContext != "" {
+		if err := c.checkCriuVersion(31600); err != nil {
+			return errors.New("--lsm-mount-context requires at least CRIU 3.16")
+		}
+		req.Opts.LsmMountContext = proto.String(criuOpts.LsmMountContext)
+	}
+
+	if criuOpts.WorkDirectory != "" {
+		// Since a container can be C/R'ed multiple times,
+		// the work directory may already exist.
+		if err := os.Mkdir(criuOpts.WorkDirectory, 0o700); err != nil && !os.IsExist(err) {
+			return err
+		}
+		workDir, err := os.Open(criuOpts.WorkDirectory)
+		if err != nil {
+			return err
+		}
+		defer workDir.Close()
+		req.Opts.WorkDirFd = proto.Int32(int32(workDir.Fd()))
+	}
+	c.handleCriuConfigurationFile(req.Opts)
+
+	if err := c.handleSwitchNamespaces(req.Opts, originalPid, &extraFiles); err != nil {
+		return err
+	}
+
+	logrus.WithField("original_pid", originalPid).Debugf("linuxContainer switch after handle namespaces, start kill original process")
+
+	// at this point, we open the fd of previous container's namespace
+	// so we delete previous running process of the container
+	status, err := c.currentStatus()
+	if err != nil {
+		return err
+	}
+	if status != Running {
+		return errors.New(fmt.Sprintf("Only support switch from a running container, current status = %v", status))
+	}
+	if err = c.initProcess.signal(os.Kill); err != nil {
+		return err
+	}
+
+	// This will modify the rootfs of the container in the same way runc
+	// modifies the container during initial creation.
+	// Because we are switching, so do prepare mounts
+	// if err := c.prepareCriuRestoreMounts(c.config.Mounts); err != nil {
+	// 	return err
+	// }
+
+	// hasCgroupns := c.config.Namespaces.Contains(configs.NEWCGROUP)
+	// for _, m := range c.config.Mounts {
+	// 	switch m.Device {
+	// 	case "bind":
+	// 		c.addCriuRestoreMount(req, m)
+	// 	case "cgroup":
+	// 		if cgroups.IsCgroup2UnifiedMode() || hasCgroupns {
+	// 			continue
+	// 		}
+	// 		// cgroup v1 is a set of bind mounts, unless cgroupns is used
+	// 		binds, err := getCgroupMounts(m)
+	// 		if err != nil {
+	// 			return err
+	// 		}
+	// 		for _, b := range binds {
+	// 			c.addCriuRestoreMount(req, b)
+	// 		}
+	// 	}
+	// }
+
+	// if len(c.config.MaskPaths) > 0 {
+	// 	m := &configs.Mount{Destination: "/dev/null", Source: "/dev/null"}
+	// 	c.addCriuRestoreMount(req, m)
+	// }
+
+	// for _, node := range c.config.Devices {
+	// 	m := &configs.Mount{Destination: node.Path, Source: node.Path}
+	// 	c.addCriuRestoreMount(req, m)
+	// }
+
+	// if criuOpts.EmptyNs&unix.CLONE_NEWNET == 0 {
+	// 	c.restoreNetwork(req, criuOpts)
+	// }
+
+	// append optional manage cgroups mode
+	if criuOpts.ManageCgroupsMode != 0 {
+		mode := criuOpts.ManageCgroupsMode
+		req.Opts.ManageCgroupsMode = &mode
+	}
+
+	var (
+		fds    []string
+		fdJSON []byte
+	)
+	if fdJSON, err = os.ReadFile(filepath.Join(criuOpts.ImagesDirectory, descriptorsFilename)); err != nil {
+		return err
+	}
+
+	if err := json.Unmarshal(fdJSON, &fds); err != nil {
+		return err
+	}
+	for i := range fds {
+		if s := fds[i]; strings.Contains(s, "pipe:") {
+			inheritFd := new(criurpc.InheritFd)
+			inheritFd.Key = proto.String(s)
+			inheritFd.Fd = proto.Int32(int32(i))
+			req.Opts.InheritFd = append(req.Opts.InheritFd, inheritFd)
+		}
+	}
+
+	if b, err := json.MarshalIndent(req, "", "  "); err == nil {
+		logrus.Debugf("criu swrk request: %s", string(b))
+	} else {
+		return fmt.Errorf("Marshal CRIU swrk request failed")
+	}
+
+	err = c.criuSwrk(process, req, criuOpts, extraFiles)
+
+	// Now that CRIU is done let's close all opened FDs CRIU needed.
+	for _, fd := range extraFiles {
+		fd.Close()
+	}
+
+	return err
+}
+
 func (c *linuxContainer) criuApplyCgroups(pid int, req *criurpc.CriuReq) error {
 	// need to apply cgroups only on restore
 	if req.GetType() != criurpc.CriuReqType_RESTORE {
@@ -1825,7 +2065,8 @@ func (c *linuxContainer) criuNotifications(resp *criurpc.CriuResp, process *Proc
 			return err
 		}
 	case "setup-namespaces":
-		if c.config.Hooks != nil {
+		// only setup namespace if not switch
+		if !opts.Switch && c.config.Hooks != nil {
 			s, err := c.currentOCIState()
 			if err != nil {
 				return nil
@@ -1853,11 +2094,19 @@ func (c *linuxContainer) criuNotifications(resp *criurpc.CriuResp, process *Proc
 			return err
 		}
 		process.ops = r
-		if err := c.state.transition(&restoredState{
-			imageDir: opts.ImagesDirectory,
-			c:        c,
-		}); err != nil {
-			return err
+		if opts.Switch {
+			if err := c.state.transition(&switchState{
+				c: c,
+			}); err != nil {
+				return err
+			}
+		} else {
+			if err := c.state.transition(&restoredState{
+				imageDir: opts.ImagesDirectory,
+				c:        c,
+			}); err != nil {
+				return err
+			}
 		}
 		// create a timestamp indicating when the restored checkpoint was started
 		c.created = time.Now().UTC()

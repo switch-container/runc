@@ -24,3 +24,5 @@ require (
 	golang.org/x/sys v0.0.0-20211116061358-0a5406a5449c
 	google.golang.org/protobuf v1.27.1
 )
+
+replace github.com/checkpoint-restore/go-criu/v5 => ../../checkpoint-restore/go-criu/

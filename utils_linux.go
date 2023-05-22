@@ -122,6 +122,7 @@ func destroy(container libcontainer.Container) {
 
 // setupIO modifies the given process config according to the options.
 func setupIO(process *libcontainer.Process, rootuid, rootgid int, createTTY, detach bool, sockpath string) (*tty, error) {
+	logrus.WithField("creatTTY", createTTY).WithField("detach", detach).Debugf("setupIO")
 	if createTTY {
 		process.Stdin = nil
 		process.Stdout = nil
@@ -233,6 +234,8 @@ type runner struct {
 	notifySocket    *notifySocket
 	criuOpts        *libcontainer.CriuOpts
 	subCgroupPaths  map[string]string
+
+	originalPid int
 }
 
 func (r *runner) run(config *specs.Process) (int, error) {
@@ -291,6 +294,8 @@ func (r *runner) run(config *specs.Process) (int, error) {
 		err = r.container.Restore(process, r.criuOpts)
 	case CT_ACT_RUN:
 		err = r.container.Run(process)
+	case CT_ACT_SWITCH:
+		err = r.container.Switch(process, r.criuOpts, r.originalPid)
 	default:
 		panic("Unknown action")
 	}
@@ -369,6 +374,7 @@ const (
 	CT_ACT_CREATE CtAct = iota + 1
 	CT_ACT_RUN
 	CT_ACT_RESTORE
+	CT_ACT_SWITCH
 )
 
 func startContainer(context *cli.Context, action CtAct, criuOpts *libcontainer.CriuOpts) (int, error) {
@@ -425,6 +431,43 @@ func startContainer(context *cli.Context, action CtAct, criuOpts *libcontainer.C
 		action:          action,
 		criuOpts:        criuOpts,
 		init:            true,
+	}
+	return r.run(spec.Process)
+}
+
+func switchContainer(context *cli.Context, criuOpts *libcontainer.CriuOpts) (int, error) {
+	if err := revisePidFile(context); err != nil {
+		return -1, err
+	}
+	spec, err := setupSpec(context)
+
+	id := context.Args().First()
+	if id == "" {
+		return -1, errEmptyID
+	}
+
+	logrus.WithField("id", id).WithField("img dir", criuOpts.ImagesDirectory).Debugf("runc start switch container")
+
+	// TODO (huang-jl) support notify socket and listen fd
+	container, err := getContainer(context)
+	if err != nil {
+		return -1, err
+	}
+
+	r := &runner{
+		enableSubreaper: !context.Bool("no-subreaper"),
+		shouldDestroy:   !context.Bool("keep"),
+		container:       container,
+		// listenFDs:       listenFDs,
+		// notifySocket:    notifySocket,
+		consoleSocket: context.String("console-socket"),
+		detach:        context.Bool("detach"),
+		pidFile:       context.String("pid-file"),
+		preserveFDs:   context.Int("preserve-fds"),
+		action:        CT_ACT_SWITCH,
+		criuOpts:      criuOpts,
+		init:          true,
+		originalPid:   context.Int("original-pid"),
 	}
 	return r.run(spec.Process)
 }
