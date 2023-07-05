@@ -52,6 +52,12 @@ func InitArgs(args ...string) func(*LinuxFactory) error {
 // containers that use the Intel RDT "resource control" filesystem to
 // create and manage Intel RDT resources (e.g., L3 cache, memory bandwidth).
 func IntelRdtFs(l *LinuxFactory) error {
+	if err := utils.Timer.StartTimer("IntelRdtFs"); err != nil {
+		return err
+	}
+	defer func() {
+		utils.Timer.FinishTimer("IntelRdtFs")
+	}()
 	if !intelrdt.IsCATEnabled() && !intelrdt.IsMBAEnabled() {
 		l.NewIntelRdtManager = nil
 	} else {
@@ -161,8 +167,14 @@ func (l *LinuxFactory) Create(id string, config *configs.Config) (Container, err
 		return nil, err
 	}
 
+	if err := utils.Timer.StartTimer("newCgroupManager"); err != nil {
+		return nil, err
+	}
 	cm, err := manager.New(config.Cgroups)
 	if err != nil {
+		return nil, err
+	}
+	if err := utils.Timer.FinishTimer("newCgroupManager"); err != nil {
 		return nil, err
 	}
 
@@ -212,8 +224,15 @@ func (l *LinuxFactory) Create(id string, config *configs.Config) (Container, err
 		newgidmapPath: l.NewgidmapPath,
 		cgroupManager: cm,
 	}
+
+	if err := utils.Timer.StartTimer("IntelRdtManager"); err != nil {
+		return nil, err
+	}
 	if l.NewIntelRdtManager != nil {
 		c.intelRdtManager = l.NewIntelRdtManager(config, id, "")
+	}
+	if err := utils.Timer.FinishTimer("IntelRdtManager"); err != nil {
+		return nil, err
 	}
 	c.state = &stoppedState{c: c}
 	return c, nil

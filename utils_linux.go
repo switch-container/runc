@@ -199,6 +199,7 @@ func createContainer(context *cli.Context, id string, spec *specs.Spec) (libcont
 	if err != nil {
 		return nil, err
 	}
+	// [<100us]
 	config, err := specconv.CreateLibcontainerConfig(&specconv.CreateOpts{
 		CgroupName:       id,
 		UseSystemdCgroup: context.GlobalBool("systemd-cgroup"),
@@ -212,6 +213,7 @@ func createContainer(context *cli.Context, id string, spec *specs.Spec) (libcont
 		return nil, err
 	}
 
+	// [11ms]
 	factory, err := loadFactory(context)
 	if err != nil {
 		return nil, err
@@ -375,8 +377,14 @@ func startContainer(context *cli.Context, action CtAct, criuOpts *libcontainer.C
 	if err := revisePidFile(context); err != nil {
 		return -1, err
 	}
+	if err := utils.Timer.StartTimer("setupSpec"); err != nil {
+		return -1, err
+	}
 	spec, err := setupSpec(context)
 	if err != nil {
+		return -1, err
+	}
+	if err := utils.Timer.FinishTimer("setupSpec"); err != nil {
 		return -1, err
 	}
 
@@ -390,7 +398,13 @@ func startContainer(context *cli.Context, action CtAct, criuOpts *libcontainer.C
 		notifySocket.setupSpec(spec)
 	}
 
+	if err := utils.Timer.StartTimer("createContainer"); err != nil {
+		return -1, err
+	}
 	container, err := createContainer(context, id, spec)
+	if err := utils.Timer.FinishTimer("createContainer"); err != nil {
+		return -1, err
+	}
 	if err != nil {
 		return -1, err
 	}
@@ -426,5 +440,9 @@ func startContainer(context *cli.Context, action CtAct, criuOpts *libcontainer.C
 		criuOpts:        criuOpts,
 		init:            true,
 	}
+	utils.Timer.StartTimer("runner.run")
+	defer func() {
+		utils.Timer.FinishTimer("runner.run")
+	}()
 	return r.run(spec.Process)
 }

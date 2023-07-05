@@ -408,8 +408,14 @@ func (p *initProcess) start() (retErr error) {
 	// Do this before syncing with child so that no children can escape the
 	// cgroup. We don't need to worry about not doing this and not being root
 	// because we'd be using the rootless cgroup manager in that case.
+	if err := utils.Timer.StartTimer("cgroupManager.Apply"); err != nil {
+		return err
+	}
 	if err := p.manager.Apply(p.pid()); err != nil {
 		return fmt.Errorf("unable to apply cgroup configuration: %w", err)
+	}
+	if err := utils.Timer.FinishTimer("cgroupManager.Apply"); err != nil {
+		return err
 	}
 	if p.intelRdtManager != nil {
 		if err := p.intelRdtManager.Apply(p.pid()); err != nil {
@@ -418,6 +424,9 @@ func (p *initProcess) start() (retErr error) {
 	}
 	if _, err := io.Copy(p.messageSockPair.parent, p.bootstrapData); err != nil {
 		return fmt.Errorf("can't copy bootstrap data to pipe: %w", err)
+	}
+	if err := utils.Timer.StartTimer("spawnChild"); err != nil {
+		return err
 	}
 	err = <-waitInit
 	if err != nil {
@@ -442,6 +451,9 @@ func (p *initProcess) start() (retErr error) {
 	if err := p.waitForChildExit(childPid); err != nil {
 		return fmt.Errorf("error waiting for our first child to exit: %w", err)
 	}
+	if err := utils.Timer.FinishTimer("spawnChild"); err != nil {
+		return err
+	}
 
 	if err := p.createNetworkInterfaces(); err != nil {
 		return fmt.Errorf("error creating network interfaces: %w", err)
@@ -457,9 +469,16 @@ func (p *initProcess) start() (retErr error) {
 		sentResume bool
 	)
 
+	if err := utils.Timer.StartTimer("parseSync"); err != nil {
+		return err
+	}
 	ierr := parseSync(p.messageSockPair.parent, func(sync *syncT) error {
 		switch sync.Type {
 		case procSeccomp:
+			if err := utils.Timer.StartTimer("procSeccomp"); err != nil {
+				return err
+			}
+			defer utils.Timer.FinishTimer("procSeccomp")
 			if p.config.Config.Seccomp.ListenerPath == "" {
 				return errors.New("listenerPath is not set")
 			}
@@ -495,6 +514,10 @@ func (p *initProcess) start() (retErr error) {
 				return err
 			}
 		case procReady:
+			if err := utils.Timer.StartTimer("procReady"); err != nil {
+				return err
+			}
+			defer utils.Timer.FinishTimer("procReady")
 			// set rlimits, this has to be done here because we lose permissions
 			// to raise the limits once we enter a user-namespace
 			if err := setupRlimits(p.config.Rlimits, p.pid()); err != nil {
@@ -577,7 +600,13 @@ func (p *initProcess) start() (retErr error) {
 				s.Status = specs.StateCreating
 				hooks := p.config.Config.Hooks
 
+				if err := utils.Timer.StartTimer("RunHooks"); err != nil {
+					return err
+				}
 				if err := hooks[configs.Prestart].RunHooks(s); err != nil {
+					return err
+				}
+				if err := utils.Timer.FinishTimer("RunHooks"); err != nil {
 					return err
 				}
 				if err := hooks[configs.CreateRuntime].RunHooks(s); err != nil {
@@ -595,6 +624,9 @@ func (p *initProcess) start() (retErr error) {
 
 		return nil
 	})
+	if err := utils.Timer.FinishTimer("parseSync"); err != nil {
+		return err
+	}
 
 	if !sentRun {
 		return fmt.Errorf("error during container init: %w", ierr)

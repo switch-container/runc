@@ -52,6 +52,9 @@ func needsSetupDev(config *configs.Config) bool {
 // inside a new mount namespace. It doesn't set anything as ro. You must call
 // finalizeRootfs after this function to finish setting up the rootfs.
 func prepareRootfs(pipe io.ReadWriter, iConfig *initConfig, mountFds []int) (err error) {
+	if err := utils.Timer.StartTimer("prepareRoot+setupDev"); err != nil {
+		return err
+	}
 	config := iConfig.Config
 	if err := prepareRoot(config); err != nil {
 		return fmt.Errorf("error preparing rootfs: %w", err)
@@ -107,12 +110,19 @@ func prepareRootfs(pipe io.ReadWriter, iConfig *initConfig, mountFds []int) (err
 		}
 	}
 
+	if err := utils.Timer.FinishTimer("prepareRoot+setupDev"); err != nil {
+		return err
+	}
+
 	// Signal the parent to run the pre-start hooks.
 	// The hooks are run after the mounts are setup, but before we switch to the new
 	// root, so that the old root is still available in the hooks for any mount
 	// manipulations.
 	// Note that iConfig.Cwd is not guaranteed to exist here.
 	if err := syncParentHooks(pipe); err != nil {
+		return err
+	}
+	if err := utils.Timer.StartTimer("pivotRoot"); err != nil {
 		return err
 	}
 
@@ -160,6 +170,9 @@ func prepareRootfs(pipe io.ReadWriter, iConfig *initConfig, mountFds []int) (err
 		}
 	}
 
+	if err := utils.Timer.FinishTimer("pivotRoot"); err != nil {
+		return err
+	}
 	return nil
 }
 

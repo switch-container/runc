@@ -1384,7 +1384,13 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 	//               support for unprivileged restore at the moment.
 
 	// We are relying on the CRIU version RPC which was introduced with CRIU 3.0.0
+	if err := utils.Timer.StartTimer("checkCriuVersion"); err != nil {
+		return err
+	}
 	if err := c.checkCriuVersion(30000); err != nil {
+		return err
+	}
+	if err := utils.Timer.FinishTimer("checkCriuVersion"); err != nil {
 		return err
 	}
 	if criuOpts.ImagesDirectory == "" {
@@ -1395,6 +1401,9 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 		return err
 	}
 	defer imageDir.Close()
+	if err := utils.Timer.StartTimer("mountRootfs"); err != nil {
+		return err
+	}
 	// CRIU has a few requirements for a root directory:
 	// * it must be a mount point
 	// * its parent must not be overmounted
@@ -1436,6 +1445,9 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 			LazyPages:       proto.Bool(criuOpts.LazyPages),
 		},
 	}
+	if err := utils.Timer.FinishTimer("mountRootfs"); err != nil {
+		return err
+	}
 
 	if criuOpts.LsmProfile != "" {
 		// CRIU older than 3.16 has a bug which breaks the possibility
@@ -1468,6 +1480,10 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 	c.handleCriuConfigurationFile(req.Opts)
 
 	if err := c.handleRestoringNamespaces(req.Opts, &extraFiles); err != nil {
+		return err
+	}
+
+	if err := utils.Timer.StartTimer("prepareRestoreMount"); err != nil {
 		return err
 	}
 
@@ -1507,8 +1523,23 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 		c.addCriuRestoreMount(req, m)
 	}
 
+	if err := utils.Timer.FinishTimer("prepareRestoreMount"); err != nil {
+		return err
+	}
+
+	if err := utils.Timer.StartTimer("restoreNetwork"); err != nil {
+		return err
+	}
+
 	if criuOpts.EmptyNs&unix.CLONE_NEWNET == 0 {
 		c.restoreNetwork(req, criuOpts)
+	}
+
+	if err := utils.Timer.FinishTimer("restoreNetwork"); err != nil {
+		return err
+	}
+	if err := utils.Timer.StartTimer("criuSwrk"); err != nil {
+		return err
 	}
 
 	// append optional manage cgroups mode
@@ -1537,6 +1568,9 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 		}
 	}
 	err = c.criuSwrk(process, req, criuOpts, extraFiles)
+	if err := utils.Timer.FinishTimer("criuSwrk"); err != nil {
+		return err
+	}
 
 	// Now that CRIU is done let's close all opened FDs CRIU needed.
 	for _, fd := range extraFiles {
@@ -1646,7 +1680,17 @@ func (c *linuxContainer) criuSwrk(process *Process, req *criurpc.CriuReq, opts *
 		}
 	}()
 
+	// [9ms]
+	if err := utils.Timer.StartTimer("CRIU.Restore"); err != nil {
+		return err
+	}
+	if err := utils.Timer.StartTimer("criuApplyCgroups"); err != nil {
+		return err
+	}
 	if err := c.criuApplyCgroups(criuProcess.Pid, req); err != nil {
+		return err
+	}
+	if err := utils.Timer.FinishTimer("criuApplyCgroups"); err != nil {
 		return err
 	}
 
@@ -1663,21 +1707,22 @@ func (c *linuxContainer) criuSwrk(process *Process, req *criurpc.CriuReq, opts *
 	// should be empty. For older CRIU versions it still will be
 	// available but empty. criurpc.CriuReqType_VERSION actually
 	// has no req.GetOpts().
-	if logrus.GetLevel() >= logrus.DebugLevel &&
-		!(req.GetType() == criurpc.CriuReqType_FEATURE_CHECK ||
-			req.GetType() == criurpc.CriuReqType_VERSION) {
+	// if logrus.GetLevel() >= logrus.DebugLevel &&
+	// 	!(req.GetType() == criurpc.CriuReqType_FEATURE_CHECK ||
+	// 		req.GetType() == criurpc.CriuReqType_VERSION) {
 
-		val := reflect.ValueOf(req.GetOpts())
-		v := reflect.Indirect(val)
-		for i := 0; i < v.NumField(); i++ {
-			st := v.Type()
-			name := st.Field(i).Name
-			if 'A' <= name[0] && name[0] <= 'Z' {
-				value := val.MethodByName("Get" + name).Call([]reflect.Value{})
-				logrus.Debugf("CRIU option %s with value %v", name, value[0])
-			}
-		}
-	}
+	// 	val := reflect.ValueOf(req.GetOpts())
+	// 	v := reflect.Indirect(val)
+	// 	for i := 0; i < v.NumField(); i++ {
+	// 		st := v.Type()
+	// 		name := st.Field(i).Name
+	// 		if 'A' <= name[0] && name[0] <= 'Z' {
+	// 			value := val.MethodByName("Get" + name).Call([]reflect.Value{})
+	// 			logrus.Debugf("CRIU option %s with value %v", name, value[0])
+	// 		}
+	// 	}
+	// }
+	// [restore took 180ms]
 	data, err := proto.Marshal(req)
 	if err != nil {
 		return err
@@ -1753,6 +1798,11 @@ func (c *linuxContainer) criuSwrk(process *Process, req *criurpc.CriuReq, opts *
 		break
 	}
 
+	if err := utils.Timer.FinishTimer("CRIU.Restore"); err != nil {
+		return err
+	}
+
+	// [wait: 130us]
 	_ = criuClientCon.CloseWrite()
 	// cmd.Wait() waits cmd.goroutines which are used for proxying file descriptors.
 	// Here we want to wait only the CRIU process.
@@ -1808,7 +1858,11 @@ func (c *linuxContainer) criuNotifications(resp *criurpc.CriuResp, process *Proc
 		return fmt.Errorf("invalid response: %s", resp.String())
 	}
 	script := notify.GetScript()
-	logrus.Debugf("notify: %s\n", script)
+	// logrus.Debugf("notify: %s\n", script)
+
+	label := fmt.Sprintf("notify-%s", script)
+	utils.Timer.StartTimer(label)
+	defer utils.Timer.FinishTimer(label)
 	switch script {
 	case "post-dump":
 		f, err := os.Create(filepath.Join(c.root, "checkpoint"))

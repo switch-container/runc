@@ -6,10 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"time"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/selinux/go-selinux"
-	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
 	"github.com/opencontainers/runc/libcontainer/apparmor"
@@ -17,6 +17,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer/keys"
 	"github.com/opencontainers/runc/libcontainer/seccomp"
 	"github.com/opencontainers/runc/libcontainer/system"
+	"github.com/opencontainers/runc/libcontainer/utils"
 )
 
 type linuxStandardInit struct {
@@ -46,6 +47,9 @@ func (l *linuxStandardInit) getSessionRingParams() (string, uint32, uint32) {
 }
 
 func (l *linuxStandardInit) Init() error {
+	if err := utils.Timer.StartTimer("StandardInit"); err != nil {
+		return err
+	}
 	if !l.config.Config.NoNewKeyring {
 		if err := selinux.SetKeyLabel(l.config.ProcessLabel); err != nil {
 			return err
@@ -87,6 +91,9 @@ func (l *linuxStandardInit) Init() error {
 	selinux.GetEnabled()
 
 	// We don't need the mountFds after prepareRootfs() nor if it fails.
+	if err := utils.Timer.StartTimer("prepareRootfs"); err != nil {
+		return err
+	}
 	err := prepareRootfs(l.pipe, l.config, l.mountFds)
 	for _, m := range l.mountFds {
 		if m == -1 {
@@ -119,6 +126,9 @@ func (l *linuxStandardInit) Init() error {
 		if err := finalizeRootfs(l.config.Config); err != nil {
 			return err
 		}
+	}
+	if err := utils.Timer.FinishTimer("prepareRootfs"); err != nil {
+		return err
 	}
 
 	if hostname := l.config.Config.Hostname; hostname != "" {
@@ -167,6 +177,9 @@ func (l *linuxStandardInit) Init() error {
 	// Without NoNewPrivileges seccomp is a privileged operation, so we need to
 	// do this before dropping capabilities; otherwise do it as late as possible
 	// just before execve so as few syscalls take place after it as possible.
+	if err := utils.Timer.StartTimer("seccomp.InitSeccomp"); err != nil {
+		return err
+	}
 	if l.config.Config.Seccomp != nil && !l.config.NoNewPrivileges {
 		seccompFd, err := seccomp.InitSeccomp(l.config.Config.Seccomp)
 		if err != nil {
@@ -177,7 +190,17 @@ func (l *linuxStandardInit) Init() error {
 			return err
 		}
 	}
+	if err := utils.Timer.FinishTimer("seccomp.InitSeccomp"); err != nil {
+		return err
+	}
+
+	if err := utils.Timer.StartTimer("seccomp.FinalizeNamespace"); err != nil {
+		return err
+	}
 	if err := finalizeNamespace(l.config); err != nil {
+		return err
+	}
+	if err := utils.Timer.FinishTimer("seccomp.FinalizeNamespace"); err != nil {
 		return err
 	}
 	// finalizeNamespace can change user/group which clears the parent death
@@ -221,7 +244,9 @@ func (l *linuxStandardInit) Init() error {
 		}
 	}
 	// Close the pipe to signal that we have completed our init.
-	logrus.Debugf("init: closing the pipe to signal completion")
+	utils.Timer.FinishTimer("StandardInit")
+	utils.Timer.ReportInOneMsg()
+	// logrus.Debugf("init: closing the pipe to signal completion")
 	_ = l.pipe.Close()
 
 	// Close the log pipe fd so the parent's ForwardLogs can exit.
@@ -257,5 +282,6 @@ func (l *linuxStandardInit) Init() error {
 		return err
 	}
 
+	fmt.Printf("before exec ts: %d", time.Now().UnixMicro())
 	return system.Exec(name, l.config.Args[0:], os.Environ())
 }

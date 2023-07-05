@@ -5,6 +5,7 @@ import (
 
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/opencontainers/runc/libcontainer/userns"
+	"github.com/opencontainers/runc/libcontainer/utils"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
@@ -101,6 +102,9 @@ using the runc checkpoint command.`,
 		},
 	},
 	Action: func(context *cli.Context) error {
+		if err := utils.Timer.StartTimer("Global.Restore"); err != nil {
+			return err
+		}
 		if err := checkArgs(context, 1, exactArgs); err != nil {
 			return err
 		}
@@ -113,10 +117,19 @@ using the runc checkpoint command.`,
 		if err := setEmptyNsMask(context, options); err != nil {
 			return err
 		}
+		if err := utils.Timer.StartTimer("startContainer"); err != nil {
+			return err
+		}
 		status, err := startContainer(context, CT_ACT_RESTORE, options)
+		if err := utils.Timer.FinishTimer("startContainer"); err != nil {
+			return err
+		}
 		if err != nil {
 			return err
 		}
+		utils.Timer.FinishTimer("Global.Restore")
+		utils.Timer.ReportInOneMsg()
+
 		// exit with the container's exit status so any external supervisor is
 		// notified of the exit with the correct exit status.
 		os.Exit(status)
