@@ -31,6 +31,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer/intelrdt"
 	"github.com/opencontainers/runc/libcontainer/system"
 	"github.com/opencontainers/runc/libcontainer/utils"
+	"github.com/opencontainers/runc/metrics"
 )
 
 const stdioFdCount = 3
@@ -238,12 +239,14 @@ func (c *linuxContainer) Start(process *Process) error {
 			return err
 		}
 	}
+  metrics.Timer.StartTimer("c.start()")
 	if err := c.start(process); err != nil {
 		if process.Init {
 			c.deleteExecFifo()
 		}
 		return err
 	}
+  metrics.Timer.FinishTimer("c.start()")
 	return nil
 }
 
@@ -336,10 +339,12 @@ type openResult struct {
 }
 
 func (c *linuxContainer) start(process *Process) (retErr error) {
+  metrics.Timer.StartTimer("c.newParentProcess()")
 	parent, err := c.newParentProcess(process)
 	if err != nil {
 		return fmt.Errorf("unable to create new parent process: %w", err)
 	}
+  metrics.Timer.FinishTimer("c.newParentProcess()")
 
 	logsDone := parent.forwardChildLogs()
 	if logsDone != nil {
@@ -353,9 +358,11 @@ func (c *linuxContainer) start(process *Process) (retErr error) {
 		}()
 	}
 
+  metrics.Timer.StartTimer("parent.start()")
 	if err := parent.start(); err != nil {
 		return fmt.Errorf("unable to start container process: %w", err)
 	}
+  metrics.Timer.FinishTimer("parent.start()")
 
 	if process.Init {
 		c.fifo.Close()

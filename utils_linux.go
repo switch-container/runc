@@ -20,6 +20,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/specconv"
 	"github.com/opencontainers/runc/libcontainer/utils"
+	"github.com/opencontainers/runc/metrics"
 )
 
 var errEmptyID = errors.New("container id cannot be empty")
@@ -213,10 +214,16 @@ func createContainer(context *cli.Context, id string, spec *specs.Spec) (libcont
 		return nil, err
 	}
 
+	metrics.Timer.StartTimer("loadFactory")
 	factory, err := loadFactory(context)
+	metrics.Timer.FinishTimer("loadFactory")
 	if err != nil {
 		return nil, err
 	}
+	metrics.Timer.StartTimer("factory.Create")
+	defer func() {
+		metrics.Timer.FinishTimer("factory.Create")
+	}()
 	return factory.Create(id, config)
 }
 
@@ -287,6 +294,7 @@ func (r *runner) run(config *specs.Process) (int, error) {
 	}
 	defer tty.Close()
 
+	metrics.Timer.StartTimer("r.container.Start()")
 	switch r.action {
 	case CT_ACT_CREATE:
 		err = r.container.Start(process)
@@ -302,6 +310,7 @@ func (r *runner) run(config *specs.Process) (int, error) {
 	if err != nil {
 		return -1, err
 	}
+	metrics.Timer.FinishTimer("r.container.Start()")
 	if err = tty.waitConsole(); err != nil {
 		r.terminate(process)
 		return -1, err
@@ -396,10 +405,12 @@ func startContainer(context *cli.Context, action CtAct, criuOpts *libcontainer.C
 		notifySocket.setupSpec(spec)
 	}
 
+	metrics.Timer.StartTimer("createContainer")
 	container, err := createContainer(context, id, spec)
 	if err != nil {
 		return -1, err
 	}
+	metrics.Timer.FinishTimer("createContainer")
 
 	if notifySocket != nil {
 		if err := notifySocket.setupSocketDirectory(); err != nil {
@@ -432,6 +443,10 @@ func startContainer(context *cli.Context, action CtAct, criuOpts *libcontainer.C
 		criuOpts:        criuOpts,
 		init:            true,
 	}
+	metrics.Timer.StartTimer("r.run()")
+	defer func() {
+		metrics.Timer.FinishTimer("r.run()")
+	}()
 	return r.run(spec.Process)
 }
 

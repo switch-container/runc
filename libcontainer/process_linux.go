@@ -19,6 +19,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer/logs"
 	"github.com/opencontainers/runc/libcontainer/system"
 	"github.com/opencontainers/runc/libcontainer/utils"
+	"github.com/opencontainers/runc/metrics"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -354,6 +355,7 @@ func (p *initProcess) waitForChildExit(childPid int) error {
 }
 
 func (p *initProcess) start() (retErr error) {
+	metrics.Timer.StartTimer("initProcess.start()-1")
 	defer p.messageSockPair.parent.Close() //nolint: errcheck
 	err := p.cmd.Start()
 	p.process.ops = p
@@ -408,22 +410,30 @@ func (p *initProcess) start() (retErr error) {
 	// Do this before syncing with child so that no children can escape the
 	// cgroup. We don't need to worry about not doing this and not being root
 	// because we'd be using the rootless cgroup manager in that case.
+  metrics.Timer.StartTimer("p.manager.Apply")
 	if err := p.manager.Apply(p.pid()); err != nil {
 		return fmt.Errorf("unable to apply cgroup configuration: %w", err)
 	}
+  metrics.Timer.FinishTimer("p.manager.Apply")
+  metrics.Timer.StartTimer("p.intelRdtManager.Apply")
 	if p.intelRdtManager != nil {
 		if err := p.intelRdtManager.Apply(p.pid()); err != nil {
 			return fmt.Errorf("unable to apply Intel RDT configuration: %w", err)
 		}
 	}
+  metrics.Timer.FinishTimer("p.intelRdtManager.Apply")
+  metrics.Timer.StartTimer("copyBootstrapData")
 	if _, err := io.Copy(p.messageSockPair.parent, p.bootstrapData); err != nil {
 		return fmt.Errorf("can't copy bootstrap data to pipe: %w", err)
 	}
+  metrics.Timer.FinishTimer("copyBootstrapData")
 	err = <-waitInit
 	if err != nil {
 		return err
 	}
+	metrics.Timer.FinishTimer("initProcess.start()-1")
 
+	metrics.Timer.StartTimer("initProcess.start()-2")
 	childPid, err := p.getChildPid()
 	if err != nil {
 		return fmt.Errorf("can't get final child's PID from pipe: %w", err)
@@ -456,10 +466,16 @@ func (p *initProcess) start() (retErr error) {
 		sentRun    bool
 		sentResume bool
 	)
+	metrics.Timer.FinishTimer("initProcess.start()-2")
 
+	metrics.Timer.StartTimer("parseSync")
 	ierr := parseSync(p.messageSockPair.parent, func(sync *syncT) error {
 		switch sync.Type {
 		case procSeccomp:
+			metrics.Timer.StartTimer("initProcess.start()-procSeccomp")
+			defer func() {
+				metrics.Timer.FinishTimer("initProcess.start()-procSeccomp")
+			}()
 			if p.config.Config.Seccomp.ListenerPath == "" {
 				return errors.New("listenerPath is not set")
 			}
@@ -495,6 +511,10 @@ func (p *initProcess) start() (retErr error) {
 				return err
 			}
 		case procReady:
+			metrics.Timer.StartTimer("initProcess.start()-procReady")
+			defer func() {
+				metrics.Timer.FinishTimer("initProcess.start()-procReady")
+			}()
 			// set rlimits, this has to be done here because we lose permissions
 			// to raise the limits once we enter a user-namespace
 			if err := setupRlimits(p.config.Rlimits, p.pid()); err != nil {
@@ -558,6 +578,10 @@ func (p *initProcess) start() (retErr error) {
 			}
 			sentRun = true
 		case procHooks:
+			metrics.Timer.StartTimer("initProcess.start()-procHooks")
+			defer func() {
+				metrics.Timer.FinishTimer("initProcess.start()-procHooks")
+			}()
 			// Setup cgroup before prestart hook, so that the prestart hook could apply cgroup permissions.
 			if err := p.manager.Set(p.config.Config.Cgroups.Resources); err != nil {
 				return fmt.Errorf("error setting cgroup config for procHooks process: %w", err)
@@ -595,6 +619,7 @@ func (p *initProcess) start() (retErr error) {
 
 		return nil
 	})
+	metrics.Timer.FinishTimer("parseSync")
 
 	if !sentRun {
 		return fmt.Errorf("error during container init: %w", ierr)
@@ -602,9 +627,11 @@ func (p *initProcess) start() (retErr error) {
 	if p.config.Config.Namespaces.Contains(configs.NEWNS) && !sentResume {
 		return errors.New("could not synchronise after executing prestart and CreateRuntime hooks with container process")
 	}
+	metrics.Timer.StartTimer("messageSockPairShutdown")
 	if err := unix.Shutdown(int(p.messageSockPair.parent.Fd()), unix.SHUT_WR); err != nil {
 		return &os.PathError{Op: "shutdown", Path: "(init pipe)", Err: err}
 	}
+	metrics.Timer.FinishTimer("messageSockPairShutdown")
 
 	// Must be done after Shutdown so the child will exit and we can wait for it.
 	if ierr != nil {

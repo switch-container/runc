@@ -7,6 +7,7 @@ import (
 
 	"github.com/opencontainers/runc/libcontainer"
 	_ "github.com/opencontainers/runc/libcontainer/nsenter"
+	"github.com/opencontainers/runc/metrics"
 	"github.com/sirupsen/logrus"
 )
 
@@ -16,6 +17,7 @@ func init() {
 		// before main() but after libcontainer/nsenter's nsexec().
 		runtime.GOMAXPROCS(1)
 		runtime.LockOSThread()
+		metrics.Timer.StartTimer("global-runc-init()")
 
 		level, err := strconv.Atoi(os.Getenv("_LIBCONTAINER_LOGLEVEL"))
 		if err != nil {

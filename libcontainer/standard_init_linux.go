@@ -17,6 +17,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer/keys"
 	"github.com/opencontainers/runc/libcontainer/seccomp"
 	"github.com/opencontainers/runc/libcontainer/system"
+	"github.com/opencontainers/runc/metrics"
 )
 
 type linuxStandardInit struct {
@@ -76,6 +77,7 @@ func (l *linuxStandardInit) Init() error {
 		}
 	}
 
+	metrics.Timer.StartTimer("standardInit.Init()-1")
 	if err := setupNetwork(l.config); err != nil {
 		return err
 	}
@@ -85,8 +87,10 @@ func (l *linuxStandardInit) Init() error {
 
 	// initialises the labeling system
 	selinux.GetEnabled()
+	metrics.Timer.FinishTimer("standardInit.Init()-1")
 
 	// We don't need the mountFds after prepareRootfs() nor if it fails.
+	metrics.Timer.StartTimer("standardInit.Init()-prepareRootfs")
 	err := prepareRootfs(l.pipe, l.config, l.mountFds)
 	for _, m := range l.mountFds {
 		if m == -1 {
@@ -101,7 +105,9 @@ func (l *linuxStandardInit) Init() error {
 	if err != nil {
 		return err
 	}
+	metrics.Timer.FinishTimer("standardInit.Init()-prepareRootfs")
 
+	metrics.Timer.StartTimer("standardInit.Init()-2")
 	// Set up the console. This has to be done *before* we finalize the rootfs,
 	// but *after* we've given the user the chance to set up all of the mounts
 	// they wanted.
@@ -145,6 +151,8 @@ func (l *linuxStandardInit) Init() error {
 			return fmt.Errorf("can't mask path %s: %w", path, err)
 		}
 	}
+	metrics.Timer.FinishTimer("standardInit.Init()-2")
+	metrics.Timer.StartTimer("standardInit.Init()-3")
 	pdeath, err := system.GetParentDeathSignal()
 	if err != nil {
 		return fmt.Errorf("can't get pdeath signal: %w", err)
@@ -221,6 +229,9 @@ func (l *linuxStandardInit) Init() error {
 		}
 	}
 	// Close the pipe to signal that we have completed our init.
+	metrics.Timer.FinishTimer("standardInit.Init()-3")
+	metrics.Timer.FinishTimer("global-runc-init()")
+	metrics.Timer.Report()
 	logrus.Debugf("init: closing the pipe to signal completion")
 	_ = l.pipe.Close()
 

@@ -19,6 +19,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer/configs/validate"
 	"github.com/opencontainers/runc/libcontainer/intelrdt"
 	"github.com/opencontainers/runc/libcontainer/utils"
+	"github.com/opencontainers/runc/metrics"
 	"github.com/sirupsen/logrus"
 )
 
@@ -347,12 +348,19 @@ func (l *LinuxFactory) StartInitialization() (err error) {
 		}
 	}()
 
+	metrics.Timer.StartTimer("newContainerInit()")
 	i, err := newContainerInit(it, pipe, consoleSocket, fifofd, logPipeFd, mountFds)
 	if err != nil {
 		return err
 	}
+	metrics.Timer.FinishTimer("newContainerInit()")
 
 	// If Init succeeds, syscall.Exec will not return, hence none of the defers will be called.
+
+	metrics.Timer.FinishTimer("i.Init()")
+	defer func() {
+		metrics.Timer.FinishTimer("i.Init()")
+	}()
 	return i.Init()
 }
 

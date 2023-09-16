@@ -15,6 +15,7 @@ import (
 	"github.com/moby/sys/mountinfo"
 	"github.com/opencontainers/runc/libcontainer/cgroups/fscommon"
 	"github.com/opencontainers/runc/libcontainer/configs"
+	"github.com/opencontainers/runc/metrics"
 )
 
 /*
@@ -199,6 +200,10 @@ var (
 
 // Check if Intel RDT sub-features are enabled in featuresInit()
 func featuresInit() {
+	metrics.Timer.StartTimer("featuresInit()")
+	defer func() {
+		metrics.Timer.FinishTimer("featuresInit()")
+	}()
 	initOnce.Do(func() {
 		// 1. Check if hardware and kernel support Intel RDT sub-features
 		flagsSet, err := parseCpuInfoFile("/proc/cpuinfo")
