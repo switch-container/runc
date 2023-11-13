@@ -1808,9 +1808,9 @@ func (c *linuxContainer) criuApplyCgroups(pid int, req *criurpc.CriuReq) error {
 		return err
 	}
 
-	if cgroups.IsCgroup2UnifiedMode() {
-		return nil
-	}
+	// if cgroups.IsCgroup2UnifiedMode() {
+	// 	return nil
+	// }
 	// the stuff below is cgroupv1-specific
 
 	path := fmt.Sprintf("/proc/%d/cgroup", pid)
